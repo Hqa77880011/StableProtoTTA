@@ -81,6 +81,10 @@ def parse_config(commands):
     parser.add_argument("--set", action="append", default=[], metavar="KEY=JSON")
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    config.setdefault("epsilon", 1e-6)
+    config.setdefault("class_counts", None)
+    config.setdefault("sampling_seed", 2026)
+    config.setdefault("rare_classes", [])
     for key, value in vars(args).items():
         if key not in ["command", "config", "set"] and value is not None:
             config[key] = value
@@ -273,7 +277,9 @@ class FeatureNet(nn.Module):
 
 
 class CorruptionImages(Dataset):
-    def __init__(self, root, name, severity, limit=0):
+    def __init__(self, root, name, severity, limit=0, class_counts=None, sampling_seed=2026):
+        if not 1 <= severity <= 5:
+            raise ValueError("severity must be in [1, 5]")
         root = Path(root)
         self.images = np.load(root / f"{name}.npy", mmap_mode="r", allow_pickle=False)
         labels = np.load(root / "labels.npy", allow_pickle=False)
@@ -287,6 +293,13 @@ class CorruptionImages(Dataset):
         self.labels = (
             labels[:count] if len(labels) == count else labels[offset : offset + count]
         )
+        if class_counts is not None:
+            # Fixed protocol selection occurs before the unlabeled adapter runs.
+            rng = np.random.default_rng(sampling_seed)
+            indices = np.concatenate([rng.permutation(np.flatnonzero(self.labels == int(k)))[:n]
+                                      for k, n in sorted(class_counts.items(), key=lambda item: int(item[0]))])
+            rng.shuffle(indices)
+            self.images, self.labels = self.images[indices], self.labels[indices]
         if limit:
             self.images = self.images[:limit]
             self.labels = self.labels[:limit]

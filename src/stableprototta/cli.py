@@ -20,6 +20,7 @@ from .common import (
     plot_csv,
 )
 from .method import Adapter, VARIANTS
+from .metrics import order_metrics
 
 
 def train(config):
@@ -91,7 +92,7 @@ def evaluate(config):
     orders = (
         config["order_seeds"] if config["protocol"] == "continual" else [config["seed"]]
     )
-    rows, batches = [], []
+    rows, batches, per_order = [], [], []
     for order_seed in orders:
         sequence = list(domains)
         if config["protocol"] == "continual":
@@ -101,19 +102,25 @@ def evaluate(config):
             ]
             random.Random(order_seed).shuffle(sequence)
         adapter = None
+        order_start = len(rows)
+        class_correct = np.zeros(len(state["classes"]), dtype=np.int64)
+        class_counts = np.zeros_like(class_correct)
         batch_index = 0
         seed_everything(order_seed)
         for name, severity in sequence:
             if adapter is None or config["protocol"] == "episodic":
                 adapter = Adapter(source_model(state, config), config)
             data = CorruptionImages(
-                config["corruption_root"], name, severity, config["limit"]
+                config["corruption_root"], name, severity, config["limit"],
+                config.get("class_counts"), config.get("sampling_seed", 2026)
             )
             correct = total = accepted = accepted_correct = 0
             for x, y in loader(data, config):
                 prediction, mask, details = adapter.adapt(x.to(device_of(config)))
                 prediction, mask = prediction.cpu(), mask.cpu()
                 hits = prediction == y
+                class_counts += np.bincount(y.numpy(), minlength=len(class_counts))
+                class_correct += np.bincount(y[hits].numpy(), minlength=len(class_counts))
                 correct += hits.sum().item()
                 total += len(y)
                 accepted += mask.sum().item()
@@ -141,11 +148,16 @@ def evaluate(config):
                     "severity": severity,
                     "accuracy": 100 * correct / total,
                     "accepted_ratio": accepted / total,
+                    "samples": total,
+                    "correct": correct,
+                    "accepted": accepted,
+                    "accepted_correct": accepted_correct,
                     "accepted_precision": accepted_correct / accepted
                     if accepted
                     else None,
                 }
             )
+        per_order.append({"order_seed": order_seed, **order_metrics(rows[order_start:], class_correct, class_counts, config.get("rare_classes", []))})
     order_scores = [
         np.mean([row["accuracy"] for row in rows if row["order_seed"] == seed])
         for seed in orders
@@ -157,20 +169,19 @@ def evaluate(config):
         "order_std": float(np.std(order_scores, ddof=1))
         if len(order_scores) > 1
         else 0.0,
-        "domains": len(domains),
+        "domains_per_order": len(sequence),
+        "per_order": per_order,
     }
+    for key in ["micro_accuracy", "macro_accuracy", "rare_accuracy", "common_accuracy", "accepted_ratio", "accepted_precision"]:
+        values = [r[key] for r in per_order if r[key] is not None]
+        summary[key] = float(np.mean(values)) if values else None
     output = Path(config["output"])
     save_rows(output / "domains.csv", rows)
     save_rows(output / "stream.csv", batches)
     save_json(output / "metrics.json", summary)
     save_json(output / "config.json", config)
     torch.save(
-        {
-            "model": adapter.model.state_dict(),
-            "prototypes": adapter.prototypes.cpu(),
-            "threshold": adapter.threshold,
-            "optimizer": adapter.optimizer.state_dict() if adapter.optimizer else None,
-        },
+        adapter.state_dict(),
         output / "adapted.pt",
     )
     print(json.dumps(summary), flush=True)

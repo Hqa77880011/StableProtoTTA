@@ -1,6 +1,6 @@
 import torch
+from copy import deepcopy
 from torch import nn
-from torch.nn import functional as F
 
 VARIANTS = [
     "stableprototta",
@@ -13,6 +13,7 @@ VARIANTS = [
     "no_proto_gate",
     "no_proto_loss",
     "no_memory",
+    "confidence_memory",
 ]
 
 
@@ -40,14 +41,32 @@ class Adapter:
         self.optimizer = (
             torch.optim.Adam(parameters, lr=config["tta_lr"]) if parameters else None
         )
-        self.prototypes = F.normalize(model.classifier.weight.detach().clone(), dim=1)
+        self.prototypes = self.normalize(model.classifier.weight.detach().clone(), dim=1)
         self.threshold = None
+
+    def normalize(self, value, dim):
+        """Use the paper's additive-epsilon normalization, including near zero."""
+        return value / (value.norm(dim=dim, keepdim=True) + self.config.get("epsilon", 1e-6))
+
+    def state_dict(self):
+        """Snapshot all persistent adaptation state for an exact continuation."""
+        return deepcopy({"model": self.model.state_dict(), "prototypes": self.prototypes,
+                         "threshold": self.threshold,
+                         "optimizer": self.optimizer.state_dict() if self.optimizer else None})
+
+    def load_state_dict(self, state):
+        """Restore a snapshot into an adapter with the same model and settings."""
+        self.model.load_state_dict(state["model"])
+        self.prototypes = state["prototypes"].to(next(self.model.parameters()).device).clone()
+        self.threshold = state["threshold"]
+        if self.optimizer is not None and state["optimizer"] is not None:
+            self.optimizer.load_state_dict(state["optimizer"])
 
     def adapt(self, x):
         logits, features = self.model(x)
         predictions = logits.detach().argmax(1)
         confidence = logits.detach().softmax(1).max(1).values
-        normalized = F.normalize(features, dim=1)
+        normalized = self.normalize(features, dim=1)
         similarity = (normalized.detach() * self.prototypes[predictions]).sum(1)
         variant = self.variant
         if variant in ["source", "bn"]:
@@ -62,6 +81,7 @@ class Adapter:
             "no_proto_gate",
             "no_proto_loss",
             "no_memory",
+            "confidence_memory",
         ]
         if dynamic:
             quantile = torch.quantile(confidence, self.config["quantile"]).item()
@@ -80,7 +100,8 @@ class Adapter:
         mask = torch.ones(len(x), dtype=torch.bool, device=x.device)
         if variant not in ["tent", "proto"]:
             mask &= confidence >= self.threshold
-        if variant in ["stableprototta", "no_proto_loss", "no_memory"]:
+        confidence_mask = mask.clone()
+        if variant in ["stableprototta", "no_proto_loss", "no_memory", "confidence_memory"]:
             mask &= similarity >= self.config["gamma"]
         loss_value = 0.0
         accepted = normalized.detach().clone()
@@ -91,7 +112,7 @@ class Adapter:
                 .sum(1)
                 .mean()
             )
-            if variant in ["stableprototta", "proto", "no_proto_gate", "no_memory"]:
+            if variant in ["stableprototta", "proto", "no_proto_gate", "no_memory", "confidence_memory"]:
                 alignment = 1 - (
                     normalized[mask] * self.prototypes[predictions[mask]].detach()
                 ).sum(1)
@@ -100,16 +121,14 @@ class Adapter:
             loss.backward()
             self.optimizer.step()
             loss_value = loss.item()
-            if variant in ["stableprototta", "proto", "no_proto_gate", "no_proto_loss"]:
-                with torch.no_grad():
-                    for label in predictions[mask].unique():
-                        subset = mask & (predictions == label)
-                        center = (accepted[subset] * confidence[subset, None]).sum(
-                            0
-                        ) / confidence[subset].sum().clamp_min(1e-6)
-                        self.prototypes[label] = F.normalize(
-                            self.config["prototype_momentum"] * self.prototypes[label]
-                            + (1 - self.config["prototype_momentum"]) * center,
-                            dim=0,
-                        )
+        memory_mask = confidence_mask if variant == "confidence_memory" else mask
+        if variant in ["stableprototta", "proto", "no_proto_gate", "no_proto_loss", "confidence_memory"]:
+            with torch.no_grad():
+                for label in predictions[memory_mask].unique():
+                    subset = memory_mask & (predictions == label)
+                    center = (accepted[subset] * confidence[subset, None]).sum(0) / (
+                        confidence[subset].sum() + self.config.get("epsilon", 1e-6))
+                    self.prototypes[label] = self.normalize(
+                        self.config["prototype_momentum"] * self.prototypes[label]
+                        + (1 - self.config["prototype_momentum"]) * center, dim=0)
         return predictions, mask, {"threshold": self.threshold, "loss": loss_value}
