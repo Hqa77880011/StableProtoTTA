@@ -62,6 +62,8 @@ Run directories contain `source.pt`, `history.csv`, `domains.csv`, `stream.csv`,
 
 ## Verification
 
+Rechecked on 2026-11-01 by running the existing `python tests/smoke.py` end to end, with one CPU thread and the source package available on `PYTHONPATH=src`.
+
 ```bash
 python tests/smoke.py
 ```
