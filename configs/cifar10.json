@@ -51,6 +51,9 @@
     "source",
     "bn",
     "tent",
+    "eata",
+    "t3a",
+    "cotta",
     "gate",
     "dynamic_gate",
     "proto",
@@ -74,5 +77,14 @@
     2027,
     2028
   ],
-  "continual_severity": 5
+  "continual_severity": 5,
+  "fisher_samples": 2000,
+  "eata_margin_factor": 0.4,
+  "eata_diversity": 0.05,
+  "eata_fisher_alpha": 2000,
+  "t3a_filter_k": 20,
+  "cotta_augmentations": 32,
+  "cotta_anchor_threshold": 0.9,
+  "cotta_teacher_momentum": 0.99,
+  "cotta_restore": 0.1
 }

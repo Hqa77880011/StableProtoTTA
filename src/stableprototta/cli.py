@@ -21,6 +21,7 @@ from .common import (
 )
 from .method import Adapter, VARIANTS
 from .metrics import order_metrics
+from .baselines import BASELINES, BaselineAdapter, source_fisher
 
 
 def train(config):
@@ -92,6 +93,12 @@ def evaluate(config):
     orders = (
         config["order_seeds"] if config["protocol"] == "continual" else [config["seed"]]
     )
+    fishers = None
+    if config["variant"] == "eata":
+        fishers = source_fisher(
+            source_model(state, config), Images(config, "train"),
+            config.get("fisher_samples", 2000),
+        )
     rows, batches, per_order = [], [], []
     for order_seed in orders:
         sequence = list(domains)
@@ -109,7 +116,10 @@ def evaluate(config):
         seed_everything(order_seed)
         for name, severity in sequence:
             if adapter is None or config["protocol"] == "episodic":
-                adapter = Adapter(source_model(state, config), config)
+                if config["variant"] in BASELINES:
+                    adapter = BaselineAdapter(source_model(state, config), config, fishers)
+                else:
+                    adapter = Adapter(source_model(state, config), config)
             data = CorruptionImages(
                 config["corruption_root"], name, severity, config["limit"],
                 config.get("class_counts"), config.get("sampling_seed", 2026)
